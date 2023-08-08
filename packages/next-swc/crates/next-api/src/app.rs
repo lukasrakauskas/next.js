@@ -55,6 +55,7 @@ use turbopack_binding::{
 use crate::{
     project::Project,
     route::{Endpoint, Route, Routes, WrittenEndpoint},
+    server_actions::{create_server_actions_manifest, get_actions, ModuleActionMap},
 };
 
 #[turbo_tasks::value]
@@ -466,12 +467,20 @@ impl AppEndpoint {
     async fn output(self: Vc<Self>) -> Result<Vc<AppEndpointOutput>> {
         let this = self.await?;
 
-        let app_entry = match this.ty {
-            AppEndpointType::Page { ty: _, loader_tree } => self.app_page_entry(loader_tree),
+        let (app_entry, actions) = match this.ty {
+            AppEndpointType::Page { ty: _, loader_tree } => (
+                self.app_page_entry(loader_tree),
+                get_actions(
+                    loader_tree,
+                    Vc::upcast(this.app_project.rsc_module_context()),
+                ),
+            ),
             // NOTE(alexkirsz) For routes, technically, a lot of the following code is not needed,
             // as we know we won't have any client references. However, for now, for simplicity's
             // sake, we just do the same thing as for pages.
-            AppEndpointType::Route { path } => self.app_route_entry(path),
+            AppEndpointType::Route { path } => {
+                (self.app_route_entry(path), ModuleActionMap::empty())
+            }
         };
 
         let node_root = this.app_project.project().node_root();
@@ -755,7 +764,7 @@ impl AppEndpoint {
                         app_entry.rsc_entry,
                         this.app_project.rsc_runtime_entries(),
                     );
-                output_assets.push(rsc_chunk);
+                output_assets.push(rsc_chunk.clone());
 
                 let app_paths_manifest_output = create_app_paths_manifest(
                     node_root,
@@ -768,13 +777,30 @@ impl AppEndpoint {
                 )?;
                 output_assets.push(app_paths_manifest_output);
 
+                // TODO Generate server entry point that imports all actions by importing their
+                // respective modules.
+
+                create_server_actions_manifest(
+                    node_root,
+                    this.app_project.project().project_path(),
+                    &app_entry.original_name,
+                    NextRuntime::NodeJs,
+                    actions,
+                    &mut output_assets,
+                    Vc::upcast(this.app_project.rsc_module_context()),
+                    Vc::upcast(this.app_project.project().ssr_chunking_context()),
+                )
+                .await?;
+
                 AppEndpointOutput::NodeJs {
                     rsc_chunk,
                     output_assets: Vc::cell(output_assets),
                 }
             }
-        };
-        Ok(endpoint_output.cell())
+        }
+        .cell();
+
+        Ok(endpoint_output)
     }
 }
 
